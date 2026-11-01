@@ -2,9 +2,9 @@
 
 A production-style n8n workflow for inbound leads. A web form posts to a webhook, the lead is validated and de-duplicated, Claude rates it Hot, Warm or Cold with a one-line reason, and then the contact is upserted in HubSpot, logged to a Google Sheet, a Slack alert goes out for Hot leads, and the lead gets a welcome email. A separate error workflow emails the team if any step fails.
 
-![Live webhook run: hot, cold, duplicate and invalid leads](media/live-webhook-run.png)
+![Cloud execution of a Hot lead: every node green, from webhook through Claude to HubSpot, Sheets, Slack and Gmail](media/cloud-execution.png)
 
-*A real run on self-hosted n8n with real Claude calls: the hot lead is rated Hot and routed to Slack, the student is rated Cold, the repeat email is caught as a duplicate and the broken submission is rejected with every error listed.*
+*A real run on n8n Cloud: the lead is validated, de-duplicated, rated Hot by Claude, upserted to HubSpot, logged to Google Sheets, posted to Slack and sent a welcome email. Screenshots of each destination are under [Tested live](#tested-live).*
 
 ## How it works
 
@@ -96,34 +96,38 @@ The tests cover validation and normalisation, the Claude request shape, every pa
 
 ## Tested live
 
-**Tested live on 1 November 2026, self-hosted n8n 2.45.7, real Claude calls (`claude-sonnet-5-5`).** The four leads in `samples/leads.json` were posted to the production webhook. HubSpot, Sheets, Slack and Gmail nodes were switched off for this run (no accounts on the test machine), so this run proves everything up to and including the routing into them:
+### Full run on n8n Cloud, 1 November 2026
 
-| Lead | Webhook reply | Claude's rating | Path taken |
-|---|---|---|---|
-| Dental group owner, budget and January deadline | `202 accepted` | **Hot**: "Practice owner of a three-clinic dental group wants online booking with SMS reminders live before 15 January, with a stated $8k-$12k budget and a request for a quote and call this week." | First attempt parsed, Hot branch into Slack |
-| Student asking for free templates | `202 accepted` | **Cold**: "Sam self-identifies as a student working on a school project and is asking for free templates..." | First attempt parsed, no Slack |
-| Same email as the Hot lead, in capitals | `200 duplicate` | not called | Stopped at Dedupe by email |
-| Bad email, no name, two-word message | `400` with all 3 errors listed | not called | Stopped at validation |
+n8n Cloud 2.46.3, workflows imported from the JSON in this repo, real Anthropic (`claude-sonnet-5-5`), HubSpot, Google Sheets, Slack and Gmail connections. Four leads were posted to the production webhook:
 
-Two failure paths were also run for real:
+| Lead | Webhook reply | Result |
+|---|---|---|
+| Dental group owner, budget and January deadline | `202 accepted` | Rated **Hot**: "Practice owner of a three-clinic dental group wants online booking with SMS reminders live by 15 January, has a stated $8k-$12k budget, and is asking for a quote and call this week." HubSpot contact upserted, Sheet row added, Slack alert posted, welcome email sent |
+| Student asking for free templates | `202 accepted` | Rated **Cold**: "...describes themselves as a student working on a project and asks for free templates... with no company, budget, or purchase intent given." HubSpot, Sheet and email done, no Slack alert |
+| The Hot lead's email again, in different capitals | `200 duplicate` | Stopped at Dedupe by email |
+| Bad email, no name, two-word message | `400`, all 3 errors listed | Stopped at validation |
 
-- **AI fallback.** On a first run the Anthropic credential was empty by mistake. Each lead went through 3 HTTP tries, the retry branch, 3 more tries, and came out as `Warm`, `needs review = yes`, reason "Automatic rating failed (API error: Authorization failed - please check your credentials)". The run still finished.
-- **Error workflow.** With the HubSpot node switched on but no credential, the main run failed at "HubSpot: upsert contact" and the error workflow ran on its own and produced: subject `n8n failure: AI Lead Pipeline at "HubSpot: upsert contact"`, body naming the error "Node does not have any credentials set" and linking the failed execution.
+![Cloud execution of the Hot lead: every node green, including HubSpot, Sheets, Slack and Gmail](media/cloud-execution.png)
 
-**Then on n8n Cloud (2.46.3), 1 November 2026,** imported from the exported JSON, with real Anthropic, Google Sheets and Gmail credentials. HubSpot and Slack were switched off for this first run while those accounts were being set up:
-
-- Hot lead: `202`, rated **Hot** ("...a stated $8k-$12k budget and sign-off authority this month. She is asking for a quote and a call this week."), row appended to the Sheet, welcome email delivered, and the Hot lead? check sent it down the Slack branch.
-- Cold lead: `202`, rated **Cold** ("...a student working on a school project... no company, budget, or business need stated"), row appended, welcome email delivered, no Slack.
-- Same email again in mixed case: `200 duplicate`, nothing else ran.
-- On the first attempt the Sheets step failed (see the consent tip in Setup). The error workflow fired for both runs on its own and its Gmail alert was sent. After fixing the credential, both failed executions were retried from n8n and finished cleanly. That is the recovery path described under Limitations, done for real.
-
-![The lead log Sheet after the Cloud run](media/cloud-sheet.png)
-
-**HubSpot, same day.** With the HubSpot node switched on, a second hot and cold lead ran clean end to end (webhook, Claude, HubSpot, Sheet, Gmail). Both contacts were created in HubSpot with lifecycle stage Lead and the three AI properties filled in, for example `ai_lead_rating = Hot`, `ai_needs_review = No`, and the reason text below. The Cold lead got `ai_lead_rating = Cold`.
+![The Slack alert for the Hot lead (only Hot leads post here)](media/cloud-slack-alert.png)
 
 ![HubSpot contact created by the pipeline, with the AI rating fields](media/cloud-hubspot-contact.png)
 
-<!-- SLACK-RESULTS -->
+![The lead log Sheet: one row per lead, header written by n8n](media/cloud-sheet.png)
+
+*Email addresses are blurred in the screenshots. The test leads used plus-addresses of a real inbox so the welcome emails were actually delivered.*
+
+### Failure paths, run for real
+
+- **Error workflow plus retry (Cloud).** Before the full run, the Google Sheets connection had been granted without its Sheets scope (see the consent tip in Setup). Two leads failed at "Google Sheets: log lead"; the error workflow fired for each on its own and sent its Gmail alert. After the credential was fixed, both failed executions were retried from n8n and finished cleanly, which is the recovery path described under Limitations.
+- **AI fallback (self-hosted).** On a run where the Anthropic credential was empty, each lead went through 3 HTTP tries, the retry branch and 3 more tries, then came out as `Warm`, `needs review = yes`, reason "Automatic rating failed (API error: Authorization failed - please check your credentials)". The lead still flowed on.
+- **Error alert content (self-hosted).** With the HubSpot node on but no credential, the error workflow produced the subject `n8n failure: AI Lead Pipeline at "HubSpot: upsert contact"` and a body naming the error ("Node does not have any credentials set") with a link to the failed execution.
+
+### First run, self-hosted n8n 2.45.7
+
+The same four leads were first run on a local n8n with only Claude connected (integration nodes switched off), to prove validation, dedupe, rating and routing before any accounts existed:
+
+![Live webhook run on self-hosted n8n](media/live-webhook-run.png)
 
 ## Limitations
 
