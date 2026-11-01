@@ -66,7 +66,7 @@ You need an n8n instance (Cloud or self-hosted, tested on n8n 2.45), an Anthropi
    - Google Sheets OAuth2: on "Google Sheets: log lead". On Google's consent screen tick **Select all**. Google now lets people grant scopes one by one, and if the Sheets scope is left unticked the node fails with "The resource you are requesting could not be found", which looks like a wrong Sheet ID but isn't.
    - Slack OAuth2: on "Slack: alert sales". Invite the app to the channel.
    - Gmail OAuth2: on "Gmail: welcome email" and on "Gmail: alert ops" in the error workflow.
-3. **HubSpot properties.** In HubSpot, Settings, Properties, Contact properties, create `ai_lead_rating` (single-line text or a dropdown with Hot, Warm, Cold), `ai_lead_reason` (multi-line text) and `ai_needs_review` (single-line text).
+3. **HubSpot properties.** In HubSpot, Settings, Properties, Contact properties, create `ai_lead_rating` (dropdown select with options Hot, Warm, Cold), `ai_lead_reason` (multi-line text) and `ai_needs_review` (single checkbox, values `true`/`false`). n8n's HubSpot connection can read property settings but not create them, so this is a one-off manual step.
 4. **Google Sheet.** Create a sheet with a tab called `Leads`. Leave it empty: on the first append n8n writes the header row itself (`received_at, email, name, company, budget, source, rating, reason, next_step, needs_review, ai_attempts, message`).
 5. **Config node.** Set `business_name`, `business_profile` (one or two sentences on what you sell and typical deal size, which is what Claude rates against), `google_sheet_id` and `slack_channel`.
 6. **Error workflow.** In the error workflow, set the alert address on "Gmail: alert ops" and **publish it**. On n8n 2.x an unpublished error workflow is skipped (the log says it "is not active and cannot be executed"). Then in the main workflow's Settings, pick it as the Error Workflow.
@@ -119,7 +119,11 @@ Two failure paths were also run for real:
 
 ![The lead log Sheet after the Cloud run](media/cloud-sheet.png)
 
-<!-- HUBSPOT-SLACK-RESULTS -->
+**HubSpot, same day.** With the HubSpot node switched on, a second hot and cold lead ran clean end to end (webhook, Claude, HubSpot, Sheet, Gmail). Both contacts were created in HubSpot with lifecycle stage Lead and the three AI properties filled in, for example `ai_lead_rating = Hot`, `ai_needs_review = No`, and the reason text below. The Cold lead got `ai_lead_rating = Cold`.
+
+![HubSpot contact created by the pipeline, with the AI rating fields](media/cloud-hubspot-contact.png)
+
+<!-- SLACK-RESULTS -->
 
 ## Limitations
 
