@@ -22,7 +22,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        240,
+        220,
         0
       ],
       "id": "node-102"
@@ -41,7 +41,7 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        480,
+        440,
         0
       ],
       "id": "node-103"

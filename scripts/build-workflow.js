@@ -22,7 +22,7 @@ const CONFIG = {
 const ALERT_EMAIL = 'ops@example.com';
 
 let x = 0;
-const pos = (col, row = 0) => [col * 240, row * 200];
+const pos = (col, row = 0) => [Math.round(col * 220), Math.round(row * 170)];
 const node = (name, type, typeVersion, parameters, position, extra = {}) => ({
   parameters,
   name,
@@ -86,20 +86,20 @@ function mainWorkflow() {
       path: 'lead-intake',
       responseMode: 'responseNode',
       options: {},
-    }, pos(0, 1), { webhookId: 'lead-intake' }),
+    }, pos(0, 0), { webhookId: 'lead-intake' }),
     config: node('Config', 'set', 3.4, {
       assignments: {
         assignments: Object.entries(CONFIG).map(([name, value], i) => ({ id: `cfg-${i}`, name, value, type: 'string' })),
       },
       includeOtherFields: true,
       options: {},
-    }, pos(1, 1)),
+    }, pos(1, 0)),
     validate: node('Validate and normalise', 'code', 2, code(
       `${src('validate-lead.js')}\n// ---- n8n glue ----\nreturn { json: validateLead($json.body, new Date().toISOString()) };\n`,
-    ), pos(2, 1)),
-    isValid: node('Valid?', 'if', 2.2, ifTrue('valid', '={{ $json.valid }}'), pos(3, 1)),
+    ), pos(2, 0)),
+    isValid: node('Valid?', 'if', 2.2, ifTrue('valid', '={{ $json.valid }}'), pos(3, 0)),
     reject: node('Respond 400 invalid', 'respondToWebhook', 1.1,
-      respond(400, '={{ { "status": "rejected", "errors": $json.errors } }}'), pos(4, 2)),
+      respond(400, '={{ { "status": "rejected", "errors": $json.errors } }}'), pos(4, 1)),
     dedupe: node('Dedupe by email', 'removeDuplicates', 2, {
       operation: 'removeItemsSeenInPreviousExecutions',
       dedupeValue: '={{ $json.lead.email }}',
@@ -109,27 +109,27 @@ function mainWorkflow() {
     duplicate: node('Respond 200 duplicate', 'respondToWebhook', 1.1,
       respond(200, '={{ { "status": "duplicate", "message": "This email has already been received." } }}'), pos(6, 1)),
     accept: node('Respond 202 accepted', 'respondToWebhook', 1.1,
-      respond(202, '={{ { "status": "accepted", "email": $json.lead.email } }}'), pos(6, -1)),
+      respond(202, '={{ { "status": "accepted", "email": $json.lead.email } }}'), pos(6, 0)),
     build1: node('Build Claude request', 'code', 2, code(
       `${src('rate-lead.js')}\n// ---- n8n glue ----\nconst profile = $('Config').item.json.business_profile;\nreturn { json: { lead: $json.lead, request: buildClaudeRequest($json.lead, profile, 1) } };\n`,
-    ), pos(7, -1)),
+    ), pos(7, 0)),
     claude1: node('Claude: rate lead', 'httpRequest', 4.2,
-      claudeHttp('={{ JSON.stringify($json.request) }}'), pos(8, -1), claudeSettings),
+      claudeHttp('={{ JSON.stringify($json.request) }}'), pos(8, 0), claudeSettings),
     parse1: node('Parse rating', 'code', 2, code(
       `${src('rate-lead.js')}\n// ---- n8n glue ----\nreturn { json: { lead: $('Build Claude request').item.json.lead, parsed: parseRating($json), attempts: 1 } };\n`,
-    ), pos(9, -1)),
-    ok1: node('Rating OK?', 'if', 2.2, ifTrue('ok', '={{ $json.parsed.ok }}'), pos(10, -1)),
+    ), pos(9, 0)),
+    ok1: node('Rating OK?', 'if', 2.2, ifTrue('ok', '={{ $json.parsed.ok }}'), pos(10, 0)),
     build2: node('Build retry request', 'code', 2, code(
       `${src('rate-lead.js')}\n// ---- n8n glue ----\nconst profile = $('Config').item.json.business_profile;\nreturn { json: { lead: $json.lead, request: buildClaudeRequest($json.lead, profile, 2, $json.parsed.error) } };\n`,
-    ), pos(11, 0)),
+    ), pos(11, 1)),
     claude2: node('Claude: retry', 'httpRequest', 4.2,
-      claudeHttp('={{ JSON.stringify($json.request) }}'), pos(12, 0), claudeSettings),
+      claudeHttp('={{ JSON.stringify($json.request) }}'), pos(12, 1), claudeSettings),
     parse2: node('Parse retry', 'code', 2, code(
       `${src('rate-lead.js')}\n// ---- n8n glue ----\nreturn { json: { lead: $('Build retry request').item.json.lead, parsed: parseRating($json), attempts: 2 } };\n`,
-    ), pos(13, 0)),
+    ), pos(13, 1)),
     finalise: node('Finalise rating', 'code', 2, code(
       `${src('rate-lead.js')}\n${src('messages.js')}\n// ---- n8n glue ----\nconst result = finalRating($json.parsed, $json.attempts);\nconst lead = $json.lead;\nconst businessName = $('Config').first().json.business_name;\nreturn { json: { lead, result, sheet_row: sheetRow(lead, result), slack_text: slackText(lead, result), welcome: welcomeEmail(lead, businessName) } };\n`,
-    ), pos(14, -1)),
+    ), pos(14, 0)),
     hubspot: node('HubSpot: upsert contact', 'hubspot', 2.1, {
       authentication: 'oAuth2',
       resource: 'contact',
@@ -149,30 +149,30 @@ function mainWorkflow() {
           ],
         },
       },
-    }, pos(15, -3)),
-    sheetRowNode: node('Sheet row', 'code', 2, code('return { json: $json.sheet_row };\n'), pos(15, -2)),
+    }, pos(15.5, -1.5)),
+    sheetRowNode: node('Sheet row', 'code', 2, code('return { json: $json.sheet_row };\n'), pos(15.5, -0.5)),
     sheets: node('Google Sheets: log lead', 'googleSheets', 4.5, {
       operation: 'append',
       documentId: { __rl: true, mode: 'id', value: `={{ $('Config').first().json.google_sheet_id }}` },
       sheetName: { __rl: true, mode: 'name', value: `={{ $('Config').first().json.google_sheet_tab }}` },
       columns: { mappingMode: 'autoMapInputData', value: {}, matchingColumns: [], schema: [] },
       options: {},
-    }, pos(16, -2)),
-    isHot: node('Hot lead?', 'if', 2.2, ifEquals('hot', '={{ $json.result.rating }}', 'Hot'), pos(15, -1)),
+    }, pos(16.5, -0.5)),
+    isHot: node('Hot lead?', 'if', 2.2, ifEquals('hot', '={{ $json.result.rating }}', 'Hot'), pos(15.5, 0.5)),
     slack: node('Slack: alert sales', 'slack', 2.3, {
       authentication: 'oAuth2',
       select: 'channel',
       channelId: { __rl: true, mode: 'name', value: `={{ $('Config').first().json.slack_channel }}` },
       text: '={{ $json.slack_text }}',
       otherOptions: { includeLinkToWorkflow: false },
-    }, pos(16, -1)),
+    }, pos(16.5, 0.5)),
     gmail: node('Gmail: welcome email', 'gmail', 2.1, {
       sendTo: '={{ $json.lead.email }}',
       subject: '={{ $json.welcome.subject }}',
       emailType: 'text',
       message: '={{ $json.welcome.body }}',
       options: { appendAttribution: false, senderName: `={{ $('Config').first().json.business_name }}` },
-    }, pos(15, 0)),
+    }, pos(15.5, 1.5)),
   };
 
   const c = {};

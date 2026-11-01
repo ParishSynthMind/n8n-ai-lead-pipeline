@@ -13,7 +13,7 @@
       "typeVersion": 2,
       "position": [
         0,
-        200
+        0
       ],
       "id": "node-01",
       "webhookId": "lead-intake"
@@ -61,8 +61,8 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        240,
-        200
+        220,
+        0
       ],
       "id": "node-02"
     },
@@ -76,8 +76,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        480,
-        200
+        440,
+        0
       ],
       "id": "node-03"
     },
@@ -110,8 +110,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        720,
-        200
+        660,
+        0
       ],
       "id": "node-04"
     },
@@ -127,8 +127,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        960,
-        400
+        880,
+        170
       ],
       "id": "node-05"
     },
@@ -144,7 +144,7 @@
       "type": "n8n-nodes-base.removeDuplicates",
       "typeVersion": 2,
       "position": [
-        960,
+        880,
         0
       ],
       "id": "node-06",
@@ -179,7 +179,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        1200,
+        1100,
         0
       ],
       "id": "node-07"
@@ -196,8 +196,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        1440,
-        200
+        1320,
+        170
       ],
       "id": "node-08"
     },
@@ -213,8 +213,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        1440,
-        -200
+        1320,
+        0
       ],
       "id": "node-09"
     },
@@ -228,8 +228,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1680,
-        -200
+        1540,
+        0
       ],
       "id": "node-10"
     },
@@ -259,8 +259,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1920,
-        -200
+        1760,
+        0
       ],
       "id": "node-11",
       "retryOnFail": true,
@@ -278,8 +278,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2160,
-        -200
+        1980,
+        0
       ],
       "id": "node-12"
     },
@@ -312,8 +312,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        2400,
-        -200
+        2200,
+        0
       ],
       "id": "node-13"
     },
@@ -327,8 +327,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2640,
-        0
+        2420,
+        170
       ],
       "id": "node-14"
     },
@@ -358,8 +358,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2880,
-        0
+        2640,
+        170
       ],
       "id": "node-15",
       "retryOnFail": true,
@@ -377,8 +377,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3120,
-        0
+        2860,
+        170
       ],
       "id": "node-16"
     },
@@ -392,8 +392,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3360,
-        -200
+        3080,
+        0
       ],
       "id": "node-17"
     },
@@ -431,8 +431,8 @@
       "type": "n8n-nodes-base.hubspot",
       "typeVersion": 2.1,
       "position": [
-        3600,
-        -600
+        3410,
+        -255
       ],
       "id": "node-18"
     },
@@ -446,8 +446,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3600,
-        -400
+        3410,
+        -85
       ],
       "id": "node-19"
     },
@@ -476,8 +476,8 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.5,
       "position": [
-        3840,
-        -400
+        3630,
+        -85
       ],
       "id": "node-20"
     },
@@ -509,8 +509,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        3600,
-        -200
+        3410,
+        85
       ],
       "id": "node-21"
     },
@@ -532,8 +532,8 @@
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.3,
       "position": [
-        3840,
-        -200
+        3630,
+        85
       ],
       "id": "node-22"
     },
@@ -552,8 +552,8 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        3600,
-        0
+        3410,
+        255
       ],
       "id": "node-23"
     }
