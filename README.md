@@ -63,12 +63,11 @@ You need an n8n instance (Cloud or self-hosted, tested on n8n 2.45), an Anthropi
 2. **Credentials** (create in n8n, then pick them on the nodes):
    - Anthropic: on both "Claude" HTTP nodes, Authentication is already set to the predefined `Anthropic` credential type. Paste your API key there.
    - HubSpot OAuth2 (or a private app token): on "HubSpot: upsert contact".
-   - Google Sheets OAuth2: on "Google Sheets: log lead".
+   - Google Sheets OAuth2: on "Google Sheets: log lead". On Google's consent screen tick **Select all**. Google now lets people grant scopes one by one, and if the Sheets scope is left unticked the node fails with "The resource you are requesting could not be found", which looks like a wrong Sheet ID but isn't.
    - Slack OAuth2: on "Slack: alert sales". Invite the app to the channel.
    - Gmail OAuth2: on "Gmail: welcome email" and on "Gmail: alert ops" in the error workflow.
 3. **HubSpot properties.** In HubSpot, Settings, Properties, Contact properties, create `ai_lead_rating` (single-line text or a dropdown with Hot, Warm, Cold), `ai_lead_reason` (multi-line text) and `ai_needs_review` (single-line text).
-4. **Google Sheet.** Create a sheet with a tab called `Leads` and this header row:
-   `received_at, email, name, company, budget, source, rating, reason, next_step, needs_review, ai_attempts, message`
+4. **Google Sheet.** Create a sheet with a tab called `Leads`. Leave it empty: on the first append n8n writes the header row itself (`received_at, email, name, company, budget, source, rating, reason, next_step, needs_review, ai_attempts, message`).
 5. **Config node.** Set `business_name`, `business_profile` (one or two sentences on what you sell and typical deal size, which is what Claude rates against), `google_sheet_id` and `slack_channel`.
 6. **Error workflow.** In the error workflow, set the alert address on "Gmail: alert ops" and **publish it**. On n8n 2.x an unpublished error workflow is skipped (the log says it "is not active and cannot be executed"). Then in the main workflow's Settings, pick it as the Error Workflow.
 7. **Publish** the main workflow and point your form at the production webhook URL. n8n 2.x will not publish a workflow while any node is missing its credential, so finish step 2 first (or switch off the nodes you are not using yet).
@@ -111,7 +110,16 @@ Two failure paths were also run for real:
 - **AI fallback.** On a first run the Anthropic credential was empty by mistake. Each lead went through 3 HTTP tries, the retry branch, 3 more tries, and came out as `Warm`, `needs review = yes`, reason "Automatic rating failed (API error: Authorization failed - please check your credentials)". The run still finished.
 - **Error workflow.** With the HubSpot node switched on but no credential, the main run failed at "HubSpot: upsert contact" and the error workflow ran on its own and produced: subject `n8n failure: AI Lead Pipeline at "HubSpot: upsert contact"`, body naming the error "Node does not have any credentials set" and linking the failed execution.
 
-<!-- CLOUD-RESULTS -->
+**Then on n8n Cloud (2.46.3), 1 November 2026,** imported from the exported JSON, with real Anthropic, Google Sheets and Gmail credentials. HubSpot and Slack were switched off for this first run while those accounts were being set up:
+
+- Hot lead: `202`, rated **Hot** ("...a stated $8k-$12k budget and sign-off authority this month. She is asking for a quote and a call this week."), row appended to the Sheet, welcome email delivered, and the Hot lead? check sent it down the Slack branch.
+- Cold lead: `202`, rated **Cold** ("...a student working on a school project... no company, budget, or business need stated"), row appended, welcome email delivered, no Slack.
+- Same email again in mixed case: `200 duplicate`, nothing else ran.
+- On the first attempt the Sheets step failed (see the consent tip in Setup). The error workflow fired for both runs on its own and its Gmail alert was sent. After fixing the credential, both failed executions were retried from n8n and finished cleanly. That is the recovery path described under Limitations, done for real.
+
+![The lead log Sheet after the Cloud run](media/cloud-sheet.png)
+
+<!-- HUBSPOT-SLACK-RESULTS -->
 
 ## Limitations
 
