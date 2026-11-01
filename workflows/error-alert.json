@@ -1,0 +1,79 @@
+{
+  "name": "AI Lead Pipeline: error alert",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "node-101"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "// Text for the Slack alert, the welcome email, the Sheet row and the error alert.\n// Runs inside n8n Code nodes and in the unit tests. Pure functions.\n\nfunction sheetRow(lead, result) {\n  return {\n    received_at: lead.receivedAt,\n    email: lead.email,\n    name: lead.name,\n    company: lead.company,\n    budget: lead.budget,\n    source: lead.source,\n    rating: result.rating,\n    reason: result.reason,\n    next_step: result.nextStep,\n    needs_review: result.needsReview ? 'yes' : 'no',\n    ai_attempts: result.attempts,\n    message: lead.message,\n  };\n}\n\nfunction slackText(lead, result) {\n  const who = lead.company ? `${lead.name} (${lead.company})` : lead.name;\n  return [\n    `:fire: *Hot lead:* ${who}`,\n    `*Email:* ${lead.email}${lead.budget ? `   *Budget:* ${lead.budget}` : ''}`,\n    `*Why hot:* ${result.reason}`,\n    `*Next step:* ${result.nextStep}`,\n    `> ${lead.message.slice(0, 300)}${lead.message.length > 300 ? '...' : ''}`,\n  ].join('\\n');\n}\n\nfunction welcomeEmail(lead, businessName) {\n  const first = lead.firstName || 'there';\n  return {\n    subject: `Thanks for getting in touch with ${businessName}`,\n    body: [\n      `Hi ${first},`,\n      '',\n      `Thanks for your message. It has reached the team at ${businessName} and someone will reply within one working day.`,\n      '',\n      'If anything is urgent, just reply to this email and add a line about the deadline.',\n      '',\n      'Best regards,',\n      businessName,\n    ].join('\\n'),\n  };\n}\n\nfunction errorAlert(err) {\n  const ex = (err && err.execution) || {};\n  const wf = (err && err.workflow) || {};\n  const e = ex.error || {};\n  const node = (e.node && e.node.name) || ex.lastNodeExecuted || 'unknown node';\n  return {\n    subject: `n8n failure: ${wf.name || 'workflow'} at \"${node}\"`,\n    body: [\n      `Workflow: ${wf.name || '(unknown)'}`,\n      `Failed node: ${node}`,\n      `Error: ${e.message || '(no message)'}`,\n      `Execution: ${ex.url || ex.id || '(no link)'}`,\n      `Mode: ${ex.mode || '(unknown)'}`,\n      '',\n      'Open the execution link to see the input that failed, fix the cause, then retry the execution from n8n.',\n    ].join('\\n'),\n  };\n}\n\nif (typeof module !== 'undefined') module.exports = { sheetRow, slackText, welcomeEmail, errorAlert };\n\n// ---- n8n glue ----\nreturn { json: errorAlert($json) };\n"
+      },
+      "name": "Format alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "node-102"
+    },
+    {
+      "parameters": {
+        "sendTo": "ops@example.com",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Gmail: alert ops",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        480,
+        0
+      ],
+      "id": "node-103"
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format alert": {
+      "main": [
+        [
+          {
+            "node": "Gmail: alert ops",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

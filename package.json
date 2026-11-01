@@ -1,0 +1,12 @@
+{
+  "name": "n8n-ai-lead-pipeline",
+  "version": "1.0.0",
+  "description": "n8n lead pipeline: webhook intake, validation, dedupe, Claude lead rating, HubSpot, Google Sheets, Slack, Gmail and an error alert workflow.",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build-workflow.js",
+    "test": "node --test tests/"
+  },
+  "engines": { "node": ">=20" }
+}

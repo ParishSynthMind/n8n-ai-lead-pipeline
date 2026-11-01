@@ -1,0 +1,28 @@
+{
+  "hot": {
+    "name": "Dana Example",
+    "email": "dana.hot@example.com",
+    "company": "Example Dental Group",
+    "budget": "$8,000 to $12,000",
+    "source": "website",
+    "message": "We run three dental clinics and want online booking with SMS reminders live before 15 January. I'm the practice owner and can sign off this month. Could we get a quote and a call this week?"
+  },
+  "cold": {
+    "name": "Sam Sample",
+    "email": "sam.cold@example.com",
+    "source": "website",
+    "message": "Hi, I'm a student doing a project on web design. Can you send me some free templates and tell me how you got started?"
+  },
+  "duplicate": {
+    "name": "Dana Example",
+    "email": "DANA.HOT@example.com",
+    "company": "Example Dental Group",
+    "source": "website",
+    "message": "Just checking you got my earlier message about online booking for our clinics."
+  },
+  "invalid": {
+    "name": "",
+    "email": "not-an-email",
+    "message": "hi"
+  }
+}

@@ -1,0 +1,5 @@
+node_modules/
+.env
+PORTFOLIO-LISTING.md
+PROGRESS.md
+.DS_Store
