@@ -93,7 +93,7 @@ npm test                     # 24 tests, no API keys or network needed
 node scripts/build-workflow.js   # regenerate workflows/*.json after editing src/
 ```
 
-The tests cover validation and normalisation, the Claude request shape, every parse failure case, the Warm fallback, the Sheet/Slack/email text, the structure of both workflows (every connection valid, Slack only on the Hot branch, no credentials or addresses in the export), and they run each Code node's real source with a fake n8n context. GitHub Actions runs them on every push.
+The tests cover validation and normalisation, the Claude request shape, every parse failure case, the Warm fallback, the Sheet/Slack/email text, the structure of both workflows (every connection valid, Slack only on the Hot branch, no credentials or addresses in the export), and they run each Code node's real source with a fake n8n context. A GitHub Actions workflow that runs them on every push is ready and will be switched on shortly.
 
 ## Tested live
 
