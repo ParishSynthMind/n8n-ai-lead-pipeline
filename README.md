@@ -71,7 +71,7 @@ You need an n8n instance (Cloud or self-hosted, tested on n8n 2.45), an Anthropi
    `received_at, email, name, company, budget, source, rating, reason, next_step, needs_review, ai_attempts, message`
 5. **Config node.** Set `business_name`, `business_profile` (one or two sentences on what you sell and typical deal size, which is what Claude rates against), `google_sheet_id` and `slack_channel`.
 6. **Error workflow.** In the error workflow, set the alert address on "Gmail: alert ops" and **publish it**. On n8n 2.x an unpublished error workflow is skipped (the log says it "is not active and cannot be executed"). Then in the main workflow's Settings, pick it as the Error Workflow.
-7. **Publish** the main workflow and point your form at the production webhook URL.
+7. **Publish** the main workflow and point your form at the production webhook URL. n8n 2.x will not publish a workflow while any node is missing its credential, so finish step 2 first (or switch off the nodes you are not using yet).
 
 Test it:
 
@@ -93,7 +93,7 @@ npm test                     # 24 tests, no API keys or network needed
 node scripts/build-workflow.js   # regenerate workflows/*.json after editing src/
 ```
 
-The tests cover validation and normalisation, the Claude request shape, every parse failure case, the Warm fallback, the Sheet/Slack/email text, the structure of both workflows (every connection valid, Slack only on the Hot branch, no credentials or addresses in the export), and they run each Code node's real source with a fake n8n context. A GitHub Actions workflow that runs them on every push is ready and will be switched on shortly.
+The tests cover validation and normalisation, the Claude request shape, every parse failure case, the Warm fallback, the Sheet/Slack/email text, the structure of both workflows (every connection valid, Slack only on the Hot branch, no credentials or addresses in the export), and they run each Code node's real source with a fake n8n context. GitHub Actions runs them on every push.
 
 ## Tested live
 
