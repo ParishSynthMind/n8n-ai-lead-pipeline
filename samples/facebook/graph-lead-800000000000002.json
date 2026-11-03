@@ -1,0 +1,16 @@
+{
+  "id": "800000000000002",
+  "created_time": "2026-11-03T10:01:00+0000",
+  "ad_id": "120000000000001",
+  "ad_name": "Online booking for clinics - lead form",
+  "campaign_name": "Clinic booking Q4",
+  "form_id": "900000000000001",
+  "is_organic": false,
+  "platform": "ig",
+  "field_data": [
+    { "name": "full_name", "values": ["Riley Sample"] },
+    { "name": "email", "values": ["riley.sample@example.com"] },
+    { "name": "what_do_you_need_help_with?", "values": ["Just curious what a booking page is, I am a student doing a class project"] },
+    { "name": "when_do_you_want_to_start?", "values": ["Not sure"] }
+  ]
+}

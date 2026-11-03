@@ -18,6 +18,14 @@ const CONFIG = {
   google_sheet_id: 'REPLACE_WITH_GOOGLE_SHEET_ID',
   google_sheet_tab: 'Leads',
   slack_channel: '#leads',
+  zoho_api_base: 'https://www.zohoapis.com/crm/v8',
+  notion_database_id: 'REPLACE_WITH_NOTION_DATABASE_ID',
+};
+// Facebook Lead Ads intake workflow settings (secrets come from n8n env vars).
+const FB_CONFIG = {
+  graph_base_url: 'https://graph.facebook.com',
+  graph_api_version: 'v26.0',
+  pipeline_webhook_url: 'https://REPLACE_WITH_YOUR_N8N/webhook/lead-intake',
 };
 const ALERT_EMAIL = 'ops@example.com';
 
@@ -77,6 +85,10 @@ const claudeHttp = (bodyExpr) => ({
 // Retry transient API failures inside the node, then hand any final error to
 // the parser instead of failing the run, so the lead still gets the fallback.
 const claudeSettings = { retryOnFail: true, maxTries: 3, waitBetweenTries: 3000, onError: 'continueRegularOutput' };
+// CRM writes retry transient errors, then fail loud so the error workflow fires.
+const crmSettings = { retryOnFail: true, maxTries: 3, waitBetweenTries: 3000 };
+const notionHeaders = { parameters: [{ name: 'Notion-Version', value: '2022-06-28' }] };
+const allItems = (body) => ({ mode: 'runOnceForAllItems', language: 'javaScript', jsCode: body });
 
 function mainWorkflow() {
   x = 0;
@@ -128,7 +140,7 @@ function mainWorkflow() {
       `${src('rate-lead.js')}\n// ---- n8n glue ----\nreturn { json: { lead: $('Build retry request').item.json.lead, parsed: parseRating($json), attempts: 2 } };\n`,
     ), pos(13, 1)),
     finalise: node('Finalise rating', 'code', 2, code(
-      `${src('rate-lead.js')}\n${src('messages.js')}\n// ---- n8n glue ----\nconst result = finalRating($json.parsed, $json.attempts);\nconst lead = $json.lead;\nconst businessName = $('Config').first().json.business_name;\nreturn { json: { lead, result, sheet_row: sheetRow(lead, result), slack_text: slackText(lead, result), welcome: welcomeEmail(lead, businessName) } };\n`,
+      `${src('rate-lead.js')}\n${src('messages.js')}\n${src('zoho-lead.js')}\n${src('notion-lead.js')}\n// ---- n8n glue ----\nconst result = finalRating($json.parsed, $json.attempts);\nconst lead = $json.lead;\nconst businessName = $('Config').first().json.business_name;\nreturn { json: { lead, result, sheet_row: sheetRow(lead, result), slack_text: slackText(lead, result), welcome: welcomeEmail(lead, businessName), zoho: buildZohoUpsert(lead, result), notion_query: buildNotionQuery(lead.email) } };\n`,
     ), pos(14, 0)),
     hubspot: node('HubSpot: upsert contact', 'hubspot', 2.1, {
       authentication: 'oAuth2',
@@ -173,6 +185,49 @@ function mainWorkflow() {
       message: '={{ $json.welcome.body }}',
       options: { appendAttribution: false, senderName: `={{ $('Config').first().json.business_name }}` },
     }, pos(15.5, 1.5)),
+    zoho: node('Zoho: upsert lead', 'httpRequest', 4.2, {
+      method: 'POST',
+      url: `={{ $('Config').first().json.zoho_api_base }}/Leads/upsert`,
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'zohoOAuth2Api',
+      sendBody: true,
+      specifyBody: 'json',
+      jsonBody: '={{ JSON.stringify($json.zoho) }}',
+      options: { timeout: 30000 },
+    }, pos(15.5, 2.5), crmSettings),
+    zohoCheck: node('Zoho: check result', 'code', 2, code(
+      `${src('zoho-lead.js')}\n// ---- n8n glue ----\nconst r = parseZohoUpsert($json);\nif (!r.ok) throw new Error('Zoho CRM rejected the lead: ' + r.error);\nreturn { json: { zoho_action: r.action, zoho_lead_id: r.id, email: $('Finalise rating').item.json.lead.email } };\n`,
+    ), pos(16.5, 2.5)),
+    notionFind: node('Notion: find lead', 'httpRequest', 4.2, {
+      method: 'POST',
+      url: `=https://api.notion.com/v1/databases/{{ $('Config').first().json.notion_database_id }}/query`,
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'notionApi',
+      sendHeaders: true,
+      headerParameters: notionHeaders,
+      sendBody: true,
+      specifyBody: 'json',
+      jsonBody: '={{ JSON.stringify($json.notion_query) }}',
+      options: { timeout: 30000 },
+    }, pos(15.5, 3.5), crmSettings),
+    notionBuild: node('Notion: create or update', 'code', 2, code(
+      `${src('notion-lead.js')}\n// ---- n8n glue ----\nconst fin = $('Finalise rating').item.json;\nreturn { json: buildNotionWrite($('Config').first().json.notion_database_id, $json, fin.lead, fin.result) };\n`,
+    ), pos(16.5, 3.5)),
+    notionWrite: node('Notion: write row', 'httpRequest', 4.2, {
+      method: '={{ $json.method }}',
+      url: '={{ $json.url }}',
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'notionApi',
+      sendHeaders: true,
+      headerParameters: notionHeaders,
+      sendBody: true,
+      specifyBody: 'json',
+      jsonBody: '={{ JSON.stringify($json.body) }}',
+      options: { timeout: 30000 },
+    }, pos(17.5, 3.5), crmSettings),
+    notionCheck: node('Notion: check result', 'code', 2, code(
+      `${src('notion-lead.js')}\n// ---- n8n glue ----\nconst r = parseNotionWrite($json);\nif (!r.ok) throw new Error('Notion rejected the lead: ' + r.error);\nreturn { json: { notion_action: $('Notion: create or update').item.json.action, notion_page_id: r.id, notion_url: r.url } };\n`,
+    ), pos(18.5, 3.5)),
   };
 
   const c = {};
@@ -204,6 +259,12 @@ function mainWorkflow() {
   link(N.finalise, N.gmail);
   link(N.sheetRowNode, N.sheets);
   link(N.isHot, N.slack, 0);
+  link(N.finalise, N.zoho);
+  link(N.zoho, N.zohoCheck);
+  link(N.finalise, N.notionFind);
+  link(N.notionFind, N.notionBuild);
+  link(N.notionBuild, N.notionWrite);
+  link(N.notionWrite, N.notionCheck);
 
   return {
     name: 'AI Lead Pipeline',
@@ -242,9 +303,119 @@ function errorWorkflow() {
   };
 }
 
+// Reads a secret from n8n Variables ($vars, n8n Cloud / Enterprise) or from
+// an environment variable ($env, self-hosted). Never from the workflow JSON.
+const SECRET_GLUE = `const secret = (name) => {
+  try { if (typeof $vars !== 'undefined' && $vars[name]) return $vars[name]; } catch (e) {}
+  try { return $env[name]; } catch (e) { return undefined; }
+};
+`;
+
+function facebookWorkflow() {
+  x = 200;
+  const N = {
+    getHook: node('Meta verify (GET)', 'webhook', 2, {
+      httpMethod: 'GET',
+      path: 'fb-lead-ads',
+      responseMode: 'responseNode',
+      options: {},
+    }, pos(0, -1), { webhookId: 'fb-lead-ads-verify' }),
+    handshake: node('Check handshake', 'code', 2, code(
+      `${src('meta-leads.js')}\n// ---- n8n glue ----\n${SECRET_GLUE}return { json: verifyHandshake($json.query, secret('META_VERIFY_TOKEN')) };\n`,
+    ), pos(1, -1)),
+    tokenOk: node('Token OK?', 'if', 2.2, ifTrue('tok', '={{ $json.ok }}'), pos(2, -1)),
+    challenge: node('Respond with challenge', 'respondToWebhook', 1.1,
+      { respondWith: 'text', responseBody: '={{ $json.challenge }}', options: { responseCode: 200 } }, pos(3, -1.5)),
+    badToken: node('Respond 403 wrong token', 'respondToWebhook', 1.1,
+      { respondWith: 'text', responseBody: 'Forbidden', options: { responseCode: 403 } }, pos(3, -0.5)),
+
+    postHook: node('Meta lead event (POST)', 'webhook', 2, {
+      httpMethod: 'POST',
+      path: 'fb-lead-ads',
+      responseMode: 'responseNode',
+      options: { rawBody: true },
+    }, pos(0, 1), { webhookId: 'fb-lead-ads-events' }),
+    verify: node('Verify signature', 'code', 2, allItems(
+      `${src('meta-leads.js')}\n// ---- n8n glue ----\n${SECRET_GLUE}const crypto = require('crypto');\nconst item = $input.first();\nlet raw = null;\ntry { raw = await this.helpers.getBinaryDataBuffer(0, 'data'); } catch (e) { raw = null; }\nconst headers = item.json.headers || {};\nconst check = verifySignature(raw, headers['x-hub-signature-256'], secret('META_APP_SECRET'), crypto);\nconst events = check.ok ? extractLeadgenEvents(item.json.body) : [];\nreturn [{ json: { valid: check.ok, error: check.error, events } }];\n`,
+    ), pos(1, 1)),
+    sigOk: node('Signature OK?', 'if', 2.2, ifTrue('sig', '={{ $json.valid }}'), pos(2, 1)),
+    ack: node('Respond 200 to Meta', 'respondToWebhook', 1.1,
+      respond(200, '={{ { "status": "received", "leads": $json.events.length } }}'), pos(3, 1)),
+    badSig: node('Respond 403 bad signature', 'respondToWebhook', 1.1,
+      respond(403, '={{ { "status": "rejected", "error": $json.error } }}'), pos(3, 2)),
+    config: node('FB Config', 'set', 3.4, {
+      assignments: {
+        assignments: Object.entries(FB_CONFIG).map(([name, value], i) => ({ id: `fbcfg-${i}`, name, value, type: 'string' })),
+      },
+      includeOtherFields: false,
+      options: {},
+    }, pos(4, 1)),
+    split: node('Split leadgen events', 'code', 2, allItems(
+      `${src('meta-leads.js')}\n// ---- n8n glue ----\nconst cfg = $('FB Config').first().json;\nreturn $('Verify signature').first().json.events.map((e) => ({ json: { ...e, graphUrl: graphLeadUrl(e.leadgenId, cfg.graph_api_version, cfg.graph_base_url) } }));\n`,
+    ), pos(5, 1)),
+    dedupe: node('Dedupe by leadgen_id', 'removeDuplicates', 2, {
+      operation: 'removeItemsSeenInPreviousExecutions',
+      dedupeValue: '={{ $json.leadgenId }}',
+      options: { historySize: 10000 },
+    }, pos(6, 1)),
+    graph: node('Graph: fetch lead', 'httpRequest', 4.2, {
+      method: 'GET',
+      url: '={{ $json.graphUrl }}',
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'facebookGraphApi',
+      options: { timeout: 30000 },
+    }, pos(7, 1), crmSettings),
+    map: node('Map to pipeline lead', 'code', 2, code(
+      `${src('meta-leads.js')}\n// ---- n8n glue ----\nreturn { json: graphLeadToPipelineBody($json, $('Dedupe by leadgen_id').item.json) };\n`,
+    ), pos(8, 1)),
+    forward: node('Send to lead pipeline', 'httpRequest', 4.2, {
+      method: 'POST',
+      url: `={{ $('FB Config').first().json.pipeline_webhook_url }}`,
+      sendBody: true,
+      specifyBody: 'json',
+      jsonBody: '={{ JSON.stringify($json) }}',
+      options: { timeout: 30000, response: { response: { fullResponse: true, neverError: true } } },
+    }, pos(9, 1), crmSettings),
+    check: node('Check pipeline reply', 'code', 2, code(
+      `// ---- n8n glue ----\nconst lead = $('Map to pipeline lead').item.json;\nconst status = $json.statusCode;\n// 202 = accepted and being rated, 200 = this email was already received.\nif (status !== 202 && status !== 200) {\n  throw new Error('Lead pipeline did not accept Facebook lead ' + lead.facebook_leadgen_id + ': HTTP ' + status + ' ' + JSON.stringify($json.body).slice(0, 300));\n}\nreturn { json: { facebook_leadgen_id: lead.facebook_leadgen_id, email: lead.email, pipeline_status: status, pipeline_reply: $json.body } };\n`,
+    ), pos(10, 1)),
+  };
+  const c = {};
+  const link = (from, to, outIndex = 0) => {
+    c[from.name] = c[from.name] || { main: [] };
+    while (c[from.name].main.length <= outIndex) c[from.name].main.push([]);
+    c[from.name].main[outIndex].push({ node: to.name, type: 'main', index: 0 });
+  };
+  link(N.getHook, N.handshake);
+  link(N.handshake, N.tokenOk);
+  link(N.tokenOk, N.challenge, 0);
+  link(N.tokenOk, N.badToken, 1);
+  link(N.postHook, N.verify);
+  link(N.verify, N.sigOk);
+  link(N.sigOk, N.ack, 0);
+  link(N.sigOk, N.badSig, 1);
+  link(N.ack, N.config);
+  link(N.config, N.split);
+  link(N.split, N.dedupe);
+  link(N.dedupe, N.graph);
+  link(N.graph, N.map);
+  link(N.map, N.forward);
+  link(N.forward, N.check);
+  return {
+    name: 'AI Lead Pipeline: Facebook Lead Ads intake',
+    nodes: Object.values(N),
+    connections: c,
+    settings: { executionOrder: 'v1', saveManualExecutions: true, callerPolicy: 'workflowsFromSameOwner', errorWorkflow: '' },
+    pinData: {},
+    meta: { templateCredsSetupCompleted: false },
+    tags: [],
+  };
+}
+
 const outputs = {
   'workflows/ai-lead-pipeline.json': mainWorkflow(),
   'workflows/error-alert.json': errorWorkflow(),
+  'workflows/facebook-lead-ads.json': facebookWorkflow(),
 };
 
 if (require.main === module) {
@@ -266,4 +437,4 @@ if (require.main === module) {
   process.exit(stale ? 1 : 0);
 }
 
-module.exports = { mainWorkflow, errorWorkflow, CONFIG };
+module.exports = { mainWorkflow, errorWorkflow, facebookWorkflow, CONFIG, FB_CONFIG };

@@ -1,0 +1,526 @@
+{
+  "name": "AI Lead Pipeline: Facebook Lead Ads intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "fb-lead-ads",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Meta verify (GET)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        -170
+      ],
+      "id": "node-201",
+      "webhookId": "fb-lead-ads-verify"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "// Facebook / Meta Lead Ads intake: the webhook verification handshake, the\n// X-Hub-Signature-256 check, leadgen event parsing, and turning a lead fetched\n// from the Graph API into the body the main pipeline's webhook expects.\n// Runs inside the n8n Code nodes of the \"Facebook Lead Ads intake\" workflow\n// and in the unit tests. Pure functions: crypto is passed in, no network.\n\nconst GRAPH_LEAD_FIELDS = 'id,created_time,ad_id,ad_name,adset_name,campaign_name,form_id,field_data,is_organic,platform';\nconst STANDARD = {\n  full_name: 'name', first_name: 'firstName', last_name: 'lastName', email: 'email', work_email: 'email',\n  phone_number: 'phone', work_phone_number: 'phone', company_name: 'company',\n};\n\n// GET /webhook/fb-lead-ads?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...\nfunction verifyHandshake(query, verifyToken) {\n  const q = query && typeof query === 'object' ? query : {};\n  const ok = Boolean(verifyToken) && q['hub.mode'] === 'subscribe'\n    && q['hub.verify_token'] === verifyToken && q['hub.challenge'] !== undefined && q['hub.challenge'] !== '';\n  return ok ? { ok: true, challenge: String(q['hub.challenge']) } : { ok: false, challenge: null };\n}\n\nfunction signatureFor(rawBody, appSecret, crypto) {\n  return 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');\n}\n\n// Meta signs the exact bytes it sent with the app secret. The check must run on\n// the raw body: re-serialised JSON differs (Meta escapes \"/\" and non-ASCII).\nfunction verifySignature(rawBody, header, appSecret, crypto) {\n  if (!appSecret) return { ok: false, error: 'app secret is not configured' };\n  if (rawBody === undefined || rawBody === null) return { ok: false, error: 'no raw body received' };\n  if (typeof header !== 'string' || !/^sha256=[0-9a-f]{64}$/i.test(header.trim())) {\n    return { ok: false, error: 'missing or malformed X-Hub-Signature-256 header' };\n  }\n  const expected = Buffer.from(signatureFor(rawBody, appSecret, crypto));\n  const given = Buffer.from(header.trim().toLowerCase());\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    return { ok: false, error: 'signature does not match' };\n  }\n  return { ok: true, error: null };\n}\n\n// One webhook POST can carry several leads (several entries and changes).\nfunction extractLeadgenEvents(body) {\n  if (!body || body.object !== 'page' || !Array.isArray(body.entry)) return [];\n  const events = [];\n  for (const entry of body.entry) {\n    for (const change of (entry && entry.changes) || []) {\n      const v = change && change.field === 'leadgen' ? change.value || {} : null;\n      if (!v || !/^\\d+$/.test(String(v.leadgen_id || ''))) continue;\n      events.push({\n        leadgenId: String(v.leadgen_id),\n        pageId: String(v.page_id || entry.id || ''),\n        formId: String(v.form_id || ''),\n        adId: String(v.ad_id || ''),\n        createdTime: v.created_time ? new Date(Number(v.created_time) * 1000).toISOString() : '',\n      });\n    }\n  }\n  return events;\n}\n\nfunction graphLeadUrl(leadgenId, version, baseUrl) {\n  if (!/^\\d+$/.test(String(leadgenId))) throw new Error(`invalid leadgen_id: ${leadgenId}`);\n  const base = String(baseUrl || 'https://graph.facebook.com').replace(/\\/+$/, '');\n  return `${base}/${version || 'v26.0'}/${leadgenId}?fields=${GRAPH_LEAD_FIELDS}`;\n}\n\nfunction questionLabel(key) {\n  const s = String(key).replace(/[_?]+/g, ' ').replace(/\\s+/g, ' ').trim();\n  return s ? s[0].toUpperCase() + s.slice(1) : 'Answer';\n}\n\n// Graph lead -> the JSON body the \"Lead webhook\" in the main pipeline accepts.\n// Standard questions map to fields; every custom question becomes a line of\n// the message, which is what Claude reads when it rates the lead. A form's\n// \"website\" question goes into the message too, never into body.website,\n// because that field is the pipeline's spam honeypot.\nfunction graphLeadToPipelineBody(graphLead, event) {\n  const lead = graphLead && typeof graphLead === 'object' ? graphLead : {};\n  const out = {};\n  const extra = [];\n  for (const f of Array.isArray(lead.field_data) ? lead.field_data : []) {\n    if (!f || !f.name) continue;\n    const value = (Array.isArray(f.values) ? f.values : [f.values]).filter((v) => v !== undefined && v !== null && v !== '').join(', ');\n    if (!value) continue;\n    const key = String(f.name).toLowerCase();\n    if (STANDARD[key] && !out[STANDARD[key]]) out[STANDARD[key]] = value;\n    else if (/budget/.test(key) && !out.budget) out.budget = value;\n    else extra.push(`${questionLabel(f.name)}: ${value}`);\n  }\n  const name = out.name || [out.firstName, out.lastName].filter(Boolean).join(' ');\n  const context = [lead.campaign_name && `Campaign: ${lead.campaign_name}`, lead.ad_name && `Ad: ${lead.ad_name}`].filter(Boolean);\n  let message = extra.join('\\n');\n  if (message.length < 10) {\n    message = [message, `Facebook lead form ${lead.form_id || (event && event.formId) || ''} submitted with no free-text answers.`].filter(Boolean).join('\\n');\n  }\n  if (context.length) message += `\\n(${context.join(', ')})`;\n  const body = {\n    name,\n    email: out.email || '',\n    phone: out.phone || '',\n    company: out.company || '',\n    budget: out.budget || '',\n    message,\n    source: lead.is_organic ? 'facebook_lead_form_organic' : 'facebook_lead_ads',\n    facebook_leadgen_id: String(lead.id || (event && event.leadgenId) || ''),\n  };\n  return body;\n}\n\nif (typeof module !== 'undefined') {\n  module.exports = {\n    GRAPH_LEAD_FIELDS, verifyHandshake, signatureFor, verifySignature,\n    extractLeadgenEvents, graphLeadUrl, graphLeadToPipelineBody,\n  };\n}\n\n// ---- n8n glue ----\nconst secret = (name) => {\n  try { if (typeof $vars !== 'undefined' && $vars[name]) return $vars[name]; } catch (e) {}\n  try { return $env[name]; } catch (e) { return undefined; }\n};\nreturn { json: verifyHandshake($json.query, secret('META_VERIFY_TOKEN')) };\n"
+      },
+      "name": "Check handshake",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -170
+      ],
+      "id": "node-202"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "tok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Token OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        -170
+      ],
+      "id": "node-203"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.challenge }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "name": "Respond with challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        -255
+      ],
+      "id": "node-204"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "Forbidden",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "name": "Respond 403 wrong token",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        -85
+      ],
+      "id": "node-205"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "fb-lead-ads",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "name": "Meta lead event (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        170
+      ],
+      "id": "node-206",
+      "webhookId": "fb-lead-ads-events"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Facebook / Meta Lead Ads intake: the webhook verification handshake, the\n// X-Hub-Signature-256 check, leadgen event parsing, and turning a lead fetched\n// from the Graph API into the body the main pipeline's webhook expects.\n// Runs inside the n8n Code nodes of the \"Facebook Lead Ads intake\" workflow\n// and in the unit tests. Pure functions: crypto is passed in, no network.\n\nconst GRAPH_LEAD_FIELDS = 'id,created_time,ad_id,ad_name,adset_name,campaign_name,form_id,field_data,is_organic,platform';\nconst STANDARD = {\n  full_name: 'name', first_name: 'firstName', last_name: 'lastName', email: 'email', work_email: 'email',\n  phone_number: 'phone', work_phone_number: 'phone', company_name: 'company',\n};\n\n// GET /webhook/fb-lead-ads?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...\nfunction verifyHandshake(query, verifyToken) {\n  const q = query && typeof query === 'object' ? query : {};\n  const ok = Boolean(verifyToken) && q['hub.mode'] === 'subscribe'\n    && q['hub.verify_token'] === verifyToken && q['hub.challenge'] !== undefined && q['hub.challenge'] !== '';\n  return ok ? { ok: true, challenge: String(q['hub.challenge']) } : { ok: false, challenge: null };\n}\n\nfunction signatureFor(rawBody, appSecret, crypto) {\n  return 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');\n}\n\n// Meta signs the exact bytes it sent with the app secret. The check must run on\n// the raw body: re-serialised JSON differs (Meta escapes \"/\" and non-ASCII).\nfunction verifySignature(rawBody, header, appSecret, crypto) {\n  if (!appSecret) return { ok: false, error: 'app secret is not configured' };\n  if (rawBody === undefined || rawBody === null) return { ok: false, error: 'no raw body received' };\n  if (typeof header !== 'string' || !/^sha256=[0-9a-f]{64}$/i.test(header.trim())) {\n    return { ok: false, error: 'missing or malformed X-Hub-Signature-256 header' };\n  }\n  const expected = Buffer.from(signatureFor(rawBody, appSecret, crypto));\n  const given = Buffer.from(header.trim().toLowerCase());\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    return { ok: false, error: 'signature does not match' };\n  }\n  return { ok: true, error: null };\n}\n\n// One webhook POST can carry several leads (several entries and changes).\nfunction extractLeadgenEvents(body) {\n  if (!body || body.object !== 'page' || !Array.isArray(body.entry)) return [];\n  const events = [];\n  for (const entry of body.entry) {\n    for (const change of (entry && entry.changes) || []) {\n      const v = change && change.field === 'leadgen' ? change.value || {} : null;\n      if (!v || !/^\\d+$/.test(String(v.leadgen_id || ''))) continue;\n      events.push({\n        leadgenId: String(v.leadgen_id),\n        pageId: String(v.page_id || entry.id || ''),\n        formId: String(v.form_id || ''),\n        adId: String(v.ad_id || ''),\n        createdTime: v.created_time ? new Date(Number(v.created_time) * 1000).toISOString() : '',\n      });\n    }\n  }\n  return events;\n}\n\nfunction graphLeadUrl(leadgenId, version, baseUrl) {\n  if (!/^\\d+$/.test(String(leadgenId))) throw new Error(`invalid leadgen_id: ${leadgenId}`);\n  const base = String(baseUrl || 'https://graph.facebook.com').replace(/\\/+$/, '');\n  return `${base}/${version || 'v26.0'}/${leadgenId}?fields=${GRAPH_LEAD_FIELDS}`;\n}\n\nfunction questionLabel(key) {\n  const s = String(key).replace(/[_?]+/g, ' ').replace(/\\s+/g, ' ').trim();\n  return s ? s[0].toUpperCase() + s.slice(1) : 'Answer';\n}\n\n// Graph lead -> the JSON body the \"Lead webhook\" in the main pipeline accepts.\n// Standard questions map to fields; every custom question becomes a line of\n// the message, which is what Claude reads when it rates the lead. A form's\n// \"website\" question goes into the message too, never into body.website,\n// because that field is the pipeline's spam honeypot.\nfunction graphLeadToPipelineBody(graphLead, event) {\n  const lead = graphLead && typeof graphLead === 'object' ? graphLead : {};\n  const out = {};\n  const extra = [];\n  for (const f of Array.isArray(lead.field_data) ? lead.field_data : []) {\n    if (!f || !f.name) continue;\n    const value = (Array.isArray(f.values) ? f.values : [f.values]).filter((v) => v !== undefined && v !== null && v !== '').join(', ');\n    if (!value) continue;\n    const key = String(f.name).toLowerCase();\n    if (STANDARD[key] && !out[STANDARD[key]]) out[STANDARD[key]] = value;\n    else if (/budget/.test(key) && !out.budget) out.budget = value;\n    else extra.push(`${questionLabel(f.name)}: ${value}`);\n  }\n  const name = out.name || [out.firstName, out.lastName].filter(Boolean).join(' ');\n  const context = [lead.campaign_name && `Campaign: ${lead.campaign_name}`, lead.ad_name && `Ad: ${lead.ad_name}`].filter(Boolean);\n  let message = extra.join('\\n');\n  if (message.length < 10) {\n    message = [message, `Facebook lead form ${lead.form_id || (event && event.formId) || ''} submitted with no free-text answers.`].filter(Boolean).join('\\n');\n  }\n  if (context.length) message += `\\n(${context.join(', ')})`;\n  const body = {\n    name,\n    email: out.email || '',\n    phone: out.phone || '',\n    company: out.company || '',\n    budget: out.budget || '',\n    message,\n    source: lead.is_organic ? 'facebook_lead_form_organic' : 'facebook_lead_ads',\n    facebook_leadgen_id: String(lead.id || (event && event.leadgenId) || ''),\n  };\n  return body;\n}\n\nif (typeof module !== 'undefined') {\n  module.exports = {\n    GRAPH_LEAD_FIELDS, verifyHandshake, signatureFor, verifySignature,\n    extractLeadgenEvents, graphLeadUrl, graphLeadToPipelineBody,\n  };\n}\n\n// ---- n8n glue ----\nconst secret = (name) => {\n  try { if (typeof $vars !== 'undefined' && $vars[name]) return $vars[name]; } catch (e) {}\n  try { return $env[name]; } catch (e) { return undefined; }\n};\nconst crypto = require('crypto');\nconst item = $input.first();\nlet raw = null;\ntry { raw = await this.helpers.getBinaryDataBuffer(0, 'data'); } catch (e) { raw = null; }\nconst headers = item.json.headers || {};\nconst check = verifySignature(raw, headers['x-hub-signature-256'], secret('META_APP_SECRET'), crypto);\nconst events = check.ok ? extractLeadgenEvents(item.json.body) : [];\nreturn [{ json: { valid: check.ok, error: check.error, events } }];\n"
+      },
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        170
+      ],
+      "id": "node-207"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "sig",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Signature OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        170
+      ],
+      "id": "node-208"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"status\": \"received\", \"leads\": $json.events.length } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "name": "Respond 200 to Meta",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        170
+      ],
+      "id": "node-209"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"status\": \"rejected\", \"error\": $json.error } }}",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "name": "Respond 403 bad signature",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        340
+      ],
+      "id": "node-210"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fbcfg-0",
+              "name": "graph_base_url",
+              "value": "https://graph.facebook.com",
+              "type": "string"
+            },
+            {
+              "id": "fbcfg-1",
+              "name": "graph_api_version",
+              "value": "v26.0",
+              "type": "string"
+            },
+            {
+              "id": "fbcfg-2",
+              "name": "pipeline_webhook_url",
+              "value": "https://REPLACE_WITH_YOUR_N8N/webhook/lead-intake",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "name": "FB Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        170
+      ],
+      "id": "node-211"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Facebook / Meta Lead Ads intake: the webhook verification handshake, the\n// X-Hub-Signature-256 check, leadgen event parsing, and turning a lead fetched\n// from the Graph API into the body the main pipeline's webhook expects.\n// Runs inside the n8n Code nodes of the \"Facebook Lead Ads intake\" workflow\n// and in the unit tests. Pure functions: crypto is passed in, no network.\n\nconst GRAPH_LEAD_FIELDS = 'id,created_time,ad_id,ad_name,adset_name,campaign_name,form_id,field_data,is_organic,platform';\nconst STANDARD = {\n  full_name: 'name', first_name: 'firstName', last_name: 'lastName', email: 'email', work_email: 'email',\n  phone_number: 'phone', work_phone_number: 'phone', company_name: 'company',\n};\n\n// GET /webhook/fb-lead-ads?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...\nfunction verifyHandshake(query, verifyToken) {\n  const q = query && typeof query === 'object' ? query : {};\n  const ok = Boolean(verifyToken) && q['hub.mode'] === 'subscribe'\n    && q['hub.verify_token'] === verifyToken && q['hub.challenge'] !== undefined && q['hub.challenge'] !== '';\n  return ok ? { ok: true, challenge: String(q['hub.challenge']) } : { ok: false, challenge: null };\n}\n\nfunction signatureFor(rawBody, appSecret, crypto) {\n  return 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');\n}\n\n// Meta signs the exact bytes it sent with the app secret. The check must run on\n// the raw body: re-serialised JSON differs (Meta escapes \"/\" and non-ASCII).\nfunction verifySignature(rawBody, header, appSecret, crypto) {\n  if (!appSecret) return { ok: false, error: 'app secret is not configured' };\n  if (rawBody === undefined || rawBody === null) return { ok: false, error: 'no raw body received' };\n  if (typeof header !== 'string' || !/^sha256=[0-9a-f]{64}$/i.test(header.trim())) {\n    return { ok: false, error: 'missing or malformed X-Hub-Signature-256 header' };\n  }\n  const expected = Buffer.from(signatureFor(rawBody, appSecret, crypto));\n  const given = Buffer.from(header.trim().toLowerCase());\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    return { ok: false, error: 'signature does not match' };\n  }\n  return { ok: true, error: null };\n}\n\n// One webhook POST can carry several leads (several entries and changes).\nfunction extractLeadgenEvents(body) {\n  if (!body || body.object !== 'page' || !Array.isArray(body.entry)) return [];\n  const events = [];\n  for (const entry of body.entry) {\n    for (const change of (entry && entry.changes) || []) {\n      const v = change && change.field === 'leadgen' ? change.value || {} : null;\n      if (!v || !/^\\d+$/.test(String(v.leadgen_id || ''))) continue;\n      events.push({\n        leadgenId: String(v.leadgen_id),\n        pageId: String(v.page_id || entry.id || ''),\n        formId: String(v.form_id || ''),\n        adId: String(v.ad_id || ''),\n        createdTime: v.created_time ? new Date(Number(v.created_time) * 1000).toISOString() : '',\n      });\n    }\n  }\n  return events;\n}\n\nfunction graphLeadUrl(leadgenId, version, baseUrl) {\n  if (!/^\\d+$/.test(String(leadgenId))) throw new Error(`invalid leadgen_id: ${leadgenId}`);\n  const base = String(baseUrl || 'https://graph.facebook.com').replace(/\\/+$/, '');\n  return `${base}/${version || 'v26.0'}/${leadgenId}?fields=${GRAPH_LEAD_FIELDS}`;\n}\n\nfunction questionLabel(key) {\n  const s = String(key).replace(/[_?]+/g, ' ').replace(/\\s+/g, ' ').trim();\n  return s ? s[0].toUpperCase() + s.slice(1) : 'Answer';\n}\n\n// Graph lead -> the JSON body the \"Lead webhook\" in the main pipeline accepts.\n// Standard questions map to fields; every custom question becomes a line of\n// the message, which is what Claude reads when it rates the lead. A form's\n// \"website\" question goes into the message too, never into body.website,\n// because that field is the pipeline's spam honeypot.\nfunction graphLeadToPipelineBody(graphLead, event) {\n  const lead = graphLead && typeof graphLead === 'object' ? graphLead : {};\n  const out = {};\n  const extra = [];\n  for (const f of Array.isArray(lead.field_data) ? lead.field_data : []) {\n    if (!f || !f.name) continue;\n    const value = (Array.isArray(f.values) ? f.values : [f.values]).filter((v) => v !== undefined && v !== null && v !== '').join(', ');\n    if (!value) continue;\n    const key = String(f.name).toLowerCase();\n    if (STANDARD[key] && !out[STANDARD[key]]) out[STANDARD[key]] = value;\n    else if (/budget/.test(key) && !out.budget) out.budget = value;\n    else extra.push(`${questionLabel(f.name)}: ${value}`);\n  }\n  const name = out.name || [out.firstName, out.lastName].filter(Boolean).join(' ');\n  const context = [lead.campaign_name && `Campaign: ${lead.campaign_name}`, lead.ad_name && `Ad: ${lead.ad_name}`].filter(Boolean);\n  let message = extra.join('\\n');\n  if (message.length < 10) {\n    message = [message, `Facebook lead form ${lead.form_id || (event && event.formId) || ''} submitted with no free-text answers.`].filter(Boolean).join('\\n');\n  }\n  if (context.length) message += `\\n(${context.join(', ')})`;\n  const body = {\n    name,\n    email: out.email || '',\n    phone: out.phone || '',\n    company: out.company || '',\n    budget: out.budget || '',\n    message,\n    source: lead.is_organic ? 'facebook_lead_form_organic' : 'facebook_lead_ads',\n    facebook_leadgen_id: String(lead.id || (event && event.leadgenId) || ''),\n  };\n  return body;\n}\n\nif (typeof module !== 'undefined') {\n  module.exports = {\n    GRAPH_LEAD_FIELDS, verifyHandshake, signatureFor, verifySignature,\n    extractLeadgenEvents, graphLeadUrl, graphLeadToPipelineBody,\n  };\n}\n\n// ---- n8n glue ----\nconst cfg = $('FB Config').first().json;\nreturn $('Verify signature').first().json.events.map((e) => ({ json: { ...e, graphUrl: graphLeadUrl(e.leadgenId, cfg.graph_api_version, cfg.graph_base_url) } }));\n"
+      },
+      "name": "Split leadgen events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        170
+      ],
+      "id": "node-212"
+    },
+    {
+      "parameters": {
+        "operation": "removeItemsSeenInPreviousExecutions",
+        "dedupeValue": "={{ $json.leadgenId }}",
+        "options": {
+          "historySize": 10000
+        }
+      },
+      "name": "Dedupe by leadgen_id",
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        170
+      ],
+      "id": "node-213"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.graphUrl }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "name": "Graph: fetch lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        170
+      ],
+      "id": "node-214",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "// Facebook / Meta Lead Ads intake: the webhook verification handshake, the\n// X-Hub-Signature-256 check, leadgen event parsing, and turning a lead fetched\n// from the Graph API into the body the main pipeline's webhook expects.\n// Runs inside the n8n Code nodes of the \"Facebook Lead Ads intake\" workflow\n// and in the unit tests. Pure functions: crypto is passed in, no network.\n\nconst GRAPH_LEAD_FIELDS = 'id,created_time,ad_id,ad_name,adset_name,campaign_name,form_id,field_data,is_organic,platform';\nconst STANDARD = {\n  full_name: 'name', first_name: 'firstName', last_name: 'lastName', email: 'email', work_email: 'email',\n  phone_number: 'phone', work_phone_number: 'phone', company_name: 'company',\n};\n\n// GET /webhook/fb-lead-ads?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...\nfunction verifyHandshake(query, verifyToken) {\n  const q = query && typeof query === 'object' ? query : {};\n  const ok = Boolean(verifyToken) && q['hub.mode'] === 'subscribe'\n    && q['hub.verify_token'] === verifyToken && q['hub.challenge'] !== undefined && q['hub.challenge'] !== '';\n  return ok ? { ok: true, challenge: String(q['hub.challenge']) } : { ok: false, challenge: null };\n}\n\nfunction signatureFor(rawBody, appSecret, crypto) {\n  return 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');\n}\n\n// Meta signs the exact bytes it sent with the app secret. The check must run on\n// the raw body: re-serialised JSON differs (Meta escapes \"/\" and non-ASCII).\nfunction verifySignature(rawBody, header, appSecret, crypto) {\n  if (!appSecret) return { ok: false, error: 'app secret is not configured' };\n  if (rawBody === undefined || rawBody === null) return { ok: false, error: 'no raw body received' };\n  if (typeof header !== 'string' || !/^sha256=[0-9a-f]{64}$/i.test(header.trim())) {\n    return { ok: false, error: 'missing or malformed X-Hub-Signature-256 header' };\n  }\n  const expected = Buffer.from(signatureFor(rawBody, appSecret, crypto));\n  const given = Buffer.from(header.trim().toLowerCase());\n  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) {\n    return { ok: false, error: 'signature does not match' };\n  }\n  return { ok: true, error: null };\n}\n\n// One webhook POST can carry several leads (several entries and changes).\nfunction extractLeadgenEvents(body) {\n  if (!body || body.object !== 'page' || !Array.isArray(body.entry)) return [];\n  const events = [];\n  for (const entry of body.entry) {\n    for (const change of (entry && entry.changes) || []) {\n      const v = change && change.field === 'leadgen' ? change.value || {} : null;\n      if (!v || !/^\\d+$/.test(String(v.leadgen_id || ''))) continue;\n      events.push({\n        leadgenId: String(v.leadgen_id),\n        pageId: String(v.page_id || entry.id || ''),\n        formId: String(v.form_id || ''),\n        adId: String(v.ad_id || ''),\n        createdTime: v.created_time ? new Date(Number(v.created_time) * 1000).toISOString() : '',\n      });\n    }\n  }\n  return events;\n}\n\nfunction graphLeadUrl(leadgenId, version, baseUrl) {\n  if (!/^\\d+$/.test(String(leadgenId))) throw new Error(`invalid leadgen_id: ${leadgenId}`);\n  const base = String(baseUrl || 'https://graph.facebook.com').replace(/\\/+$/, '');\n  return `${base}/${version || 'v26.0'}/${leadgenId}?fields=${GRAPH_LEAD_FIELDS}`;\n}\n\nfunction questionLabel(key) {\n  const s = String(key).replace(/[_?]+/g, ' ').replace(/\\s+/g, ' ').trim();\n  return s ? s[0].toUpperCase() + s.slice(1) : 'Answer';\n}\n\n// Graph lead -> the JSON body the \"Lead webhook\" in the main pipeline accepts.\n// Standard questions map to fields; every custom question becomes a line of\n// the message, which is what Claude reads when it rates the lead. A form's\n// \"website\" question goes into the message too, never into body.website,\n// because that field is the pipeline's spam honeypot.\nfunction graphLeadToPipelineBody(graphLead, event) {\n  const lead = graphLead && typeof graphLead === 'object' ? graphLead : {};\n  const out = {};\n  const extra = [];\n  for (const f of Array.isArray(lead.field_data) ? lead.field_data : []) {\n    if (!f || !f.name) continue;\n    const value = (Array.isArray(f.values) ? f.values : [f.values]).filter((v) => v !== undefined && v !== null && v !== '').join(', ');\n    if (!value) continue;\n    const key = String(f.name).toLowerCase();\n    if (STANDARD[key] && !out[STANDARD[key]]) out[STANDARD[key]] = value;\n    else if (/budget/.test(key) && !out.budget) out.budget = value;\n    else extra.push(`${questionLabel(f.name)}: ${value}`);\n  }\n  const name = out.name || [out.firstName, out.lastName].filter(Boolean).join(' ');\n  const context = [lead.campaign_name && `Campaign: ${lead.campaign_name}`, lead.ad_name && `Ad: ${lead.ad_name}`].filter(Boolean);\n  let message = extra.join('\\n');\n  if (message.length < 10) {\n    message = [message, `Facebook lead form ${lead.form_id || (event && event.formId) || ''} submitted with no free-text answers.`].filter(Boolean).join('\\n');\n  }\n  if (context.length) message += `\\n(${context.join(', ')})`;\n  const body = {\n    name,\n    email: out.email || '',\n    phone: out.phone || '',\n    company: out.company || '',\n    budget: out.budget || '',\n    message,\n    source: lead.is_organic ? 'facebook_lead_form_organic' : 'facebook_lead_ads',\n    facebook_leadgen_id: String(lead.id || (event && event.leadgenId) || ''),\n  };\n  return body;\n}\n\nif (typeof module !== 'undefined') {\n  module.exports = {\n    GRAPH_LEAD_FIELDS, verifyHandshake, signatureFor, verifySignature,\n    extractLeadgenEvents, graphLeadUrl, graphLeadToPipelineBody,\n  };\n}\n\n// ---- n8n glue ----\nreturn { json: graphLeadToPipelineBody($json, $('Dedupe by leadgen_id').item.json) };\n"
+      },
+      "name": "Map to pipeline lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        170
+      ],
+      "id": "node-215"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('FB Config').first().json.pipeline_webhook_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "name": "Send to lead pipeline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        170
+      ],
+      "id": "node-216",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "// ---- n8n glue ----\nconst lead = $('Map to pipeline lead').item.json;\nconst status = $json.statusCode;\n// 202 = accepted and being rated, 200 = this email was already received.\nif (status !== 202 && status !== 200) {\n  throw new Error('Lead pipeline did not accept Facebook lead ' + lead.facebook_leadgen_id + ': HTTP ' + status + ' ' + JSON.stringify($json.body).slice(0, 300));\n}\nreturn { json: { facebook_leadgen_id: lead.facebook_leadgen_id, email: lead.email, pipeline_status: status, pipeline_reply: $json.body } };\n"
+      },
+      "name": "Check pipeline reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        170
+      ],
+      "id": "node-217"
+    }
+  ],
+  "connections": {
+    "Meta verify (GET)": {
+      "main": [
+        [
+          {
+            "node": "Check handshake",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check handshake": {
+      "main": [
+        [
+          {
+            "node": "Token OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Token OK?": {
+      "main": [
+        [
+          {
+            "node": "Respond with challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 403 wrong token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta lead event (POST)": {
+      "main": [
+        [
+          {
+            "node": "Verify signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify signature": {
+      "main": [
+        [
+          {
+            "node": "Signature OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature OK?": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 to Meta",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 403 bad signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond 200 to Meta": {
+      "main": [
+        [
+          {
+            "node": "FB Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FB Config": {
+      "main": [
+        [
+          {
+            "node": "Split leadgen events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split leadgen events": {
+      "main": [
+        [
+          {
+            "node": "Dedupe by leadgen_id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedupe by leadgen_id": {
+      "main": [
+        [
+          {
+            "node": "Graph: fetch lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Graph: fetch lead": {
+      "main": [
+        [
+          {
+            "node": "Map to pipeline lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map to pipeline lead": {
+      "main": [
+        [
+          {
+            "node": "Send to lead pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to lead pipeline": {
+      "main": [
+        [
+          {
+            "node": "Check pipeline reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
